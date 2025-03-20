@@ -12,11 +12,31 @@ from audio_input import listen
 from conversation import process_voice_command
 from navigation import generate_navigation_instructions as get_navigation_instructions
 from flask import Flask, send_from_directory
+import time
 
+# Initialize the Flask app
 app = Flask(__name__)
 
 # Queue for incoming frames with a max size to prevent memory issues
 frame_queue = queue.Queue(maxsize=10)
+
+# Thread-safe last navigation instruction
+last_navigation_text = None
+lock = threading.Lock()  # Ensures thread-safe access to `last_navigation_text`
+
+
+# Thread-safe functions to manage the `last_navigation_text`
+def update_navigation_text(new_text):
+    global last_navigation_text
+    with lock:
+        last_navigation_text = new_text
+
+
+def get_navigation_text():
+    global last_navigation_text
+    with lock:
+        return last_navigation_text
+
 
 # Function to process incoming frames
 def process_frame():
@@ -28,8 +48,6 @@ def process_frame():
                 # Decode Base64 string to bytes
                 frame_bytes = base64.b64decode(frame_data)
                 np_arr = np.frombuffer(frame_bytes, dtype=np.uint8)
-                
-                # Decode JPEG to an image using OpenCV
                 frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
                 
                 if frame is None:
@@ -39,46 +57,71 @@ def process_frame():
                 # Object Detection
                 detected_objects = detect_objects(frame)
 
-                # Scene Description
-                scene_text = describe_scene(detected_objects)
-
-                # Navigation Guidance
+                # Generate Navigation Guidance
                 navigation_text = get_navigation_instructions(detected_objects)
 
-                # Audio Feedback
-                audio_path = generate_audio(navigation_text)
+                # Skip redundant navigation instructions
+                if navigation_text == get_navigation_text():
+                    print("Skipping redundant navigation instruction:", navigation_text)
+                    frame_queue.task_done()
+                    continue
 
+                # Update the last navigation text
+                update_navigation_text(navigation_text)
+
+                # Log the new instruction
                 print("Processed Frame:", {
-                    "scene_description": scene_text,
-                    "navigation_instruction": navigation_text,
-                    "audio_file": audio_path
+                    "navigation_instruction": navigation_text
                 })
 
                 frame_queue.task_done()  # Mark task as complete
+            
+            # Add sleep to process frames every 10 seconds
+            time.sleep(10)
         except Exception as e:
             print(f"Error processing frame: {e}")
+
 
 # Start the frame processing thread
 processing_thread = threading.Thread(target=process_frame, daemon=True)
 processing_thread.start()
 
+
 @app.route('/upload_frame', methods=['POST'])
 def upload_frame():
-    """Receives Base64-encoded video frames from the Android app."""
+    """Receives Base64-encoded video frames from the Android app and returns navigation instructions."""
     try:
         data = request.get_json()
         if not data or "frame" not in data:
             return jsonify({"error": "No frame provided"}), 400
 
+        # Decode Base64 frame data
         frame_data = data["frame"]
+        frame_bytes = base64.b64decode(frame_data)
+        np_arr = np.frombuffer(frame_bytes, dtype=np.uint8)
+        frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
 
-        # Instead of rejecting, remove the oldest frame if the queue is full
-        if frame_queue.full():
-            frame_queue.get()  # Discard oldest frame
-            print("Queue full, discarding oldest frame.")
+        if frame is None:
+            return jsonify({"error": "Could not decode image"}), 400
 
-        frame_queue.put(frame_data)
-        return jsonify({"status": "Frame received"}), 200
+        # Process the frame
+        detected_objects = detect_objects(frame)
+        navigation_text = get_navigation_instructions(detected_objects)
+
+        # Skip redundant navigation instructions
+        if navigation_text == get_navigation_text():
+            return jsonify({
+                "status": "No new navigation instruction"
+            }), 200
+
+        # Update the last navigation instruction
+        update_navigation_text(navigation_text)
+
+        # Return the new instruction
+        return jsonify({
+            "status": "Frame processed successfully",
+            "navigation_instruction": navigation_text
+        }), 200
     except Exception as e:
         return jsonify({"error": f"Failed to process frame: {str(e)}"}), 500
 
@@ -96,6 +139,7 @@ def gps_data():
     except Exception as e:
         return jsonify({"error": f"Failed to process GPS data: {str(e)}"}), 500
 
+
 @app.route("/voice_command", methods=["POST"])
 def voice_command():
     """Processes voice commands from the Android app."""
@@ -109,10 +153,13 @@ def voice_command():
         return jsonify({"response": response}), 200
     except Exception as e:
         return jsonify({"error": f"Failed to process voice command: {str(e)}"}), 500
-    
+
+
 @app.route('/audio_responses/<filename>')
 def serve_audio(filename):
+    """Serves pre-generated audio files."""
     return send_from_directory('audio_responses', filename)
+
 
 if __name__ == "__main__":
     print("Starting the Blind Navigation AI server...")
