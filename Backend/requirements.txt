@@ -1,0 +1,25 @@
+# PyTorch with CUDA 11.8 Support
+--extra-index-url https://download.pytorch.org/whl/cu118
+torch==2.1.0+cu118
+torchvision==0.16.0+cu118
+
+# Core Web and Networking
+flask
+flask-cors
+requests
+
+# Computer Vision and Math
+opencv-python
+numpy
+onnxruntime-gpu
+
+# Audio Processing and Speech
+pydub
+speechrecognition
+gtts
+sounddevice
+wave
+
+# Generative AI and Utilities
+google-generativeai
+geopy
